@@ -3,6 +3,7 @@ use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
 const DIRECTORIES: &str = "node_modules,venv,vendor,target,.python_libs,release,build,dist,.recovery-tools,.venv,__pycache__,.mypy_cache,.ruff_cache,.pytest_cache,.gradle,coverage";
+const DEFAULT_PERCENT: f64 = 0.15;
 const DOCUMENTS: &[&str] = &[
     "Text",
     "JSON",
@@ -43,9 +44,9 @@ pub(crate) fn configure(o: &mut Options) -> Result<()> {
         return Ok(());
     }
     if o.value("basic") == Some("") {
-        o.set("basic", "1".into());
+        o.set("basic", DEFAULT_PERCENT.to_string());
     }
-    let percent = o.number("basic", 1.0)?;
+    let percent = o.number("basic", DEFAULT_PERCENT)?;
     if percent > 100.0 {
         bail!("--basic percentage must be between 0 and 100");
     }
@@ -73,7 +74,7 @@ fn selected<'a>(
         }
     }
     let total: u64 = languages.values().sum();
-    let threshold = o.number("basic", 1.0)?;
+    let threshold = o.number("basic", DEFAULT_PERCENT)?;
     Ok(languages
         .into_iter()
         .filter(|(name, code)| {

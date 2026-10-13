@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='basic-', dir=os.environ.get('TMPDIR')) 
                                       ('C#', 'cs', 'class Type{} {{}}\n'),
                                       ('Dart', 'dart', 'void function_{}() {{}}\n')]:
         directory = root / (extension + '-project')
-        write(directory.name + '/main.' + extension, ''.join(line.format(i) for i in range(100)))
+        write(directory.name + '/main.' + extension, ''.join(line.format(i) for i in range(1000)))
         write(directory.name + '/tiny.py', 'x=1\n')
         assert set(run('--basic', directory)) == {'header', language, 'SUM'}
 
@@ -81,6 +81,13 @@ with tempfile.TemporaryDirectory(prefix='basic-', dir=os.environ.get('TMPDIR')) 
     counted = root / 'counted.log'
     run('--basic', '--counted', counted, root / 'main.py', root / 'wrapper.java')
     assert 'main.py' in counted.read_text() and 'wrapper.java' not in counted.read_text()
+
+    write('gentle/main.py', ''.join(f'x={i}\n' for i in range(1000)))
+    write('gentle/main.c', ''.join(f'int value_{i};\n' for i in range(5)))
+    write('gentle/main.sh', ''.join(f'echo value_{i}\n' for i in range(5)))
+    write('gentle/main.rs', ''.join(f'fn function_{i}() {{}}\n' for i in range(5)))
+    result = run('--basic', root / 'gentle')
+    assert {'C', 'Bourne Shell', 'Rust', 'Python'} <= result.keys(), result
 
     # A language removed on one side stays in the diff if it was substantial
     # across the pair; per-side percentage filtering would hide that deletion.

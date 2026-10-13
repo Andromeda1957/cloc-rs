@@ -31,7 +31,8 @@ build, and cache directories (including `node_modules`, `venv`, `.venv`, `vendor
 `target`, `.python_libs`, `release`, `build`, `dist`, and `.recovery-tools`), plus
 document, data, configuration, and build-file languages such as Text, Markdown,
 JSON, YAML, TOML, XML, INI, SVG, Gradle, Make, Dockerfile, and Maven.
-Languages with less than **1% of the remaining code** are then removed. Java,
+Languages with less than **0.15% of the remaining code** are then removed. This
+is roughly 1,000 lines in a project with 650,000 code lines. Java,
 Swift, C#, and Dart are selected by their share, so primary languages remain
 visible while tiny wrappers disappear. The totals include only retained languages.
 

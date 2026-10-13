@@ -117,14 +117,17 @@ with tempfile.TemporaryDirectory(prefix='progress-', dir=os.environ.get('TMPDIR'
         try:
             p = subprocess.Popen([binary, '--json', '--progress-rate=1', str(root / 'a.py')],
                                  cwd=root, stdout=subprocess.PIPE, stderr=slave)
-            os.close(slave)
-            slave = None
+            # Keep a slave descriptor open until output is drained: macOS can
+            # discard unread master output when the final slave closes.
             stdout, _ = p.communicate(timeout=20)
             assert p.returncode == 0
             terminal = bytearray()
+            os.set_blocking(master, False)
             while True:
                 try:
                     chunk = os.read(master, 4096)
+                except BlockingIOError:
+                    break
                 except OSError as e:
                     if e.errno == errno.EIO:
                         break
