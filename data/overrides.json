@@ -1,0 +1,276 @@
+{
+  "ABAP": {
+    "line": [
+      "*"
+    ],
+    "block": []
+  },
+  "AMPLE": {
+    "line": [
+      "//"
+    ],
+    "block": []
+  },
+  "Aria": {
+    "line": [
+      "#"
+    ],
+    "block": []
+  },
+  "AutoHotkey": {
+    "line": [
+      ";"
+    ],
+    "block": []
+  },
+  "CSS": {
+    "line": [],
+    "block": [
+      [
+        "/*",
+        "*/"
+      ]
+    ]
+  },
+  "dtrace": {
+    "line": [
+      "#"
+    ],
+    "block": []
+  },
+  "ERB": {
+    "line": [],
+    "block": [
+      [
+        "<%#",
+        "%>"
+      ],
+      [
+        "<!--",
+        "-->"
+      ]
+    ]
+  },
+  "Forth": {
+    "line": [
+      "\\",
+      "//"
+    ],
+    "block": [
+      [
+        "/*",
+        "*/"
+      ]
+    ],
+    "quotes": []
+  },
+  "Godot Shaders": {
+    "line": [
+      "//"
+    ],
+    "block": []
+  },
+  "Hare": {
+    "line": [
+      "//"
+    ],
+    "block": []
+  },
+  "IDL": {
+    "line": [
+      ";"
+    ],
+    "block": []
+  },
+  "lex": {
+    "line": [],
+    "block": [
+      [
+        "/*",
+        "*/"
+      ]
+    ]
+  },
+  "m4": {
+    "line": [
+      "dnl"
+    ],
+    "block": []
+  },
+  "Mathematica": {
+    "line": [],
+    "block": [
+      [
+        "(*",
+        "*)"
+      ]
+    ]
+  },
+  "MATLAB": {
+    "line": [
+      "%"
+    ],
+    "block": [
+      [
+        "%{",
+        "%}"
+      ]
+    ],
+    "quotes": [
+      [
+        "'",
+        "'"
+      ],
+      [
+        "\"",
+        "\""
+      ]
+    ]
+  },
+  "MUMPS": {
+    "line": [
+      ";"
+    ],
+    "block": []
+  },
+  "ProGuard": {
+    "line": [
+      "#"
+    ],
+    "block": []
+  },
+  "Qt Linguist": {
+    "line": [],
+    "block": [
+      [
+        "<!--",
+        "-->"
+      ]
+    ]
+  },
+  "Qt Project": {
+    "line": [
+      "#"
+    ],
+    "block": []
+  },
+  "Racket": {
+    "line": [
+      ";"
+    ],
+    "block": []
+  },
+  "ReasonML": {
+    "line": [
+      "//"
+    ],
+    "block": [
+      [
+        "/*",
+        "*/"
+      ]
+    ]
+  },
+  "Scheme": {
+    "line": [
+      ";"
+    ],
+    "block": []
+  },
+  "Smarty": {
+    "line": [],
+    "block": [
+      [
+        "{*",
+        "*}"
+      ]
+    ]
+  },
+  "Specman e": {
+    "line": [
+      "//",
+      "--"
+    ],
+    "block": []
+  },
+  "Stata": {
+    "line": [
+      "//"
+    ],
+    "block": [
+      [
+        "/*",
+        "*/"
+      ]
+    ]
+  },
+  "Templ": {
+    "line": [
+      "//"
+    ],
+    "block": []
+  },
+  "Twig": {
+    "line": [],
+    "block": [
+      [
+        "{#",
+        "#}"
+      ]
+    ]
+  },
+  "Velocity Template Language": {
+    "line": [
+      "##"
+    ],
+    "block": []
+  },
+  "Vyper": {
+    "line": [
+      "#"
+    ],
+    "block": [],
+    "quotes": [
+      [
+        "'",
+        "'"
+      ],
+      [
+        "\"",
+        "\""
+      ]
+    ]
+  },
+  "Windows Message File": {
+    "line": [],
+    "block": [
+      [
+        "/*",
+        "*/"
+      ]
+    ]
+  },
+  "Windows Resource File": {
+    "line": [
+      "//"
+    ],
+    "block": [
+      [
+        "/*",
+        "*/"
+      ]
+    ]
+  },
+  "Pascal/Puppet": {
+    "line": [],
+    "block": []
+  },
+  "Raku/Prolog": {
+    "line": [],
+    "block": []
+  },
+  "PHP/Pascal/Fortran/Pawn/BitBake": {
+    "line": [],
+    "block": []
+  }
+}
