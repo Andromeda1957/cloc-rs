@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+import tarfile
+import zipfile
 
 binary=str(Path(sys.argv[1] if len(sys.argv)>1 else 'target/debug/cloc-rs').resolve())
 checks=0
@@ -110,6 +112,26 @@ with tempfile.TemporaryDirectory(prefix='commands-',dir=os.environ.get('TMPDIR')
     assert ET.fromstring(run('--diff','--xml',source,changed)).tag=='diff_results'
     assert list(csv.reader(io.StringIO(run('--diff','--csv',source,changed))))[0][1]=='== files'
 
+    for ext in ['jpg','png','pdf']:
+        media=root/('script.'+ext);media.write_text('#!/usr/bin/env python3\nprint(1)\n')
+        assert data(media)['SUM']['nFiles']==0
+        assert data('--force-lang=Python,'+ext,media)['SUM']['code']==2
+    unknown=root/'script.unknown';unknown.write_text('#!/usr/bin/env python3\nprint(1)\n')
+    assert data(unknown)['SUM']['code']==2
+
+    for suffix in ['zip','tar','tgz']:
+        directory=root/('scan-'+suffix);directory.mkdir()
+        (directory/'main.py').write_text('x=1\n')
+        archive=directory/('archived.'+suffix)
+        if suffix=='zip':
+            with zipfile.ZipFile(archive,'w')as z:z.writestr('member.py','x=2\nx=3\n')
+        else:
+            with tarfile.open(archive,'w:gz' if suffix=='tgz' else 'w')as t:
+                info=tarfile.TarInfo('member.py');info.size=8
+                t.addfile(info,io.BytesIO(b'x=2\nx=3\n'))
+        assert data(directory)['SUM']=={'nFiles':1,'blank':0,'comment':0,'code':1}
+        assert data(archive)['SUM']=={'nFiles':1,'blank':0,'comment':0,'code':2}
+
     if sys.platform=='linux':
         import resource
         artifacts=root/'artifacts';artifacts.mkdir()
@@ -124,4 +146,12 @@ with tempfile.TemporaryDirectory(prefix='commands-',dir=os.environ.get('TMPDIR')
         checks+=1
         assert p.returncode==0,p.stderr
         assert json.loads(p.stdout)['SUM']=={'nFiles':1,'blank':0,'comment':0,'code':1}
+        images=root/'images';images.mkdir()
+        first=images/'image.jpg';first.write_bytes(b'\xff\xd8'+b'\0'*4094)
+        for i in range(40_000):os.link(first,images/f'image-{i}.jpg')
+        p=subprocess.run([binary,'--json','--quiet',str(images)],cwd=root,
+                         preexec_fn=memory_limit,capture_output=True,text=True,timeout=30)
+        checks+=1
+        assert p.returncode==0,p.stderr
+        assert json.loads(p.stdout)['SUM']['nFiles']==0
 print(f'{checks} CLI checks passed')

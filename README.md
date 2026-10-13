@@ -7,6 +7,7 @@ blank, comment, and code lines across 511 language definitions, including cloc
 
 ```sh
 cloc-rs .
+cloc-rs --basic .
 cloc-rs --json --exclude-dir=target,node_modules .
 cloc-rs --by-file --include-lang=Rust,Python src
 cloc-rs --vcs=git
@@ -16,6 +17,30 @@ cloc-rs --git --diff HEAD~1 HEAD
 cloc-rs --csv --out=counts.csv project.tar.gz
 cat main.py | cloc-rs --stdin-name=main.py -
 ```
+
+Interactive runs show scanning, reading, classification, and counting progress
+on a single line that updates in place on stderr. Counting updates appear as
+files finish, including with `--processes`. Default updates are limited to twice
+per second. `--quiet` or `--progress-rate=0` disables progress; an explicit
+`--progress-rate=N` requests an update every N files and also enables progress
+when stderr is redirected. Redirected progress uses separate lines without
+terminal control codes. Report data stays on stdout.
+
+`--basic` focuses on the project's main source languages. It excludes dependency,
+build, and cache directories (including `node_modules`, `venv`, `.venv`, `vendor`,
+`target`, `.python_libs`, `release`, `build`, `dist`, and `.recovery-tools`), plus
+document, data, configuration, and build-file languages such as Text, Markdown,
+JSON, YAML, TOML, XML, INI, SVG, Gradle, Make, Dockerfile, and Maven.
+Languages with less than **1% of the remaining code** are then removed. Java,
+Swift, C#, and Dart are selected by their share, so primary languages remain
+visible while tiny wrappers disappear. The totals include only retained languages.
+
+Use `--basic=0.5` for a 0.5% threshold, or `--basic=0` to retain every source
+language while still excluding documents and dependencies. `--include-lang`
+explicitly preserves requested languages, including document formats. If there
+are no code lines, the percentage filter leaves comment-only files visible.
+Diffs select languages using both sides together so removed source stays visible.
+Without `--basic`, counting keeps cloc's normal directory selection.
 
 ## Install
 
@@ -32,6 +57,8 @@ The executable is `cloc-rs`, so it can coexist with Perl cloc. Perl is not requi
 at runtime. Git inputs require Git; SVN listings require SVN.
 
 Native archives include zip/jar/war/ear, tar, and gzip/bzip2/xz/zstd tarballs.
+Pass an archive explicitly to count its contents; directory scans skip archives,
+matching cloc's input selection.
 They are read in memory without disk extraction. Other types can use an explicit
 `--extract-with='COMMAND >FILE<'`. Custom extraction uses a unique temporary
 directory removed after processing; `--sdir` selects its parent.
@@ -115,6 +142,8 @@ cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 python3 tests/commands.py target/debug/cloc-rs
+python3 tests/progress.py target/debug/cloc-rs
+python3 tests/basic.py target/debug/cloc-rs
 python3 tests/compatibility.py --reference cloc-2.10.pl --catalog
 ```
 
@@ -140,6 +169,9 @@ reports median wall time; results depend on the inputs and filesystem cache.
 Binary and unknown files are rejected after inspecting a small prefix rather
 than loading every build artifact. The CLI suite includes a bounded-memory scan
 with 160 MiB of binary artifacts to prevent this performance regression.
+It also scans 40,000 image paths with a 128 MiB memory limit.
+Known media extensions are skipped before opening files, matching the reference.
+Filter lists, regular expressions, and filename language lookups are cached.
 
 ## License
 

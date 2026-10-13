@@ -140,6 +140,11 @@ with tempfile.TemporaryDirectory(prefix='compat-', dir=os.environ.get('TMPDIR'))
     script=root/'script';script.write_text('#!/usr/bin/env python3\nprint(1)\n')
     check('shebang',[str(script)],root)
     check('lang-no-ext',['--lang-no-ext=Python',str(script)],root)
+    for ext in ['jpg','png','pdf','JPG','unknown']:
+        media=root/('script.'+ext);media.write_text('#!/usr/bin/env python3\nprint(1)\n')
+        check('shebang extension '+ext,[str(media)],root)
+        check('forced extension '+ext,['--force-lang=Python,'+ext,str(media)],root)
+        check('binary option extension '+ext,['--read-binary-files',str(media)],root)
     for suffix in ['.zip','.tar','.tar.gz','.tar.bz2','.tar.xz']:
         p=root/('fixture'+suffix)
         if suffix=='.zip':
@@ -150,6 +155,10 @@ with tempfile.TemporaryDirectory(prefix='compat-', dir=os.environ.get('TMPDIR'))
             mode={'.tar':'w','.tar.gz':'w:gz','.tar.bz2':'w:bz2','.tar.xz':'w:xz'}[suffix]
             with tarfile.open(p,mode)as t:t.add(fixture,arcname='fixture')
         check('archive '+suffix,[str(p)],root)
+        scan=root/('scan-archive'+suffix.replace('.','-'));scan.mkdir()
+        shutil.copyfile(p,scan/p.name)
+        (scan/'main.py').write_text('print(19)\n')
+        check('directory containing archive '+suffix,[str(scan)],root)
     listing=root/'list.txt';listing.write_text(str(fixture/'python.py')+'\n'+str(fixture/'rust.rs')+'\n')
     check('list',['--list-file='+str(listing)],root)
     exclude=root/'exclude.txt';exclude.write_text(str(fixture/'python.py')+'\n')

@@ -30,6 +30,7 @@ pub struct Language {
 pub struct Registry {
     pub languages: BTreeMap<String, Language>,
     pub extensions: BTreeMap<String, String>,
+    filenames: BTreeMap<String, String>,
 }
 impl Registry {
     pub fn new(o: &Options) -> Result<Self> {
@@ -37,6 +38,7 @@ impl Registry {
         let mut r = Self {
             languages: BTreeMap::new(),
             extensions: BTreeMap::new(),
+            filenames: BTreeMap::new(),
         };
         if !o.has("force-lang-def") {
             for d in defs {
@@ -104,7 +106,31 @@ impl Registry {
         for ext in &d.extensions {
             self.extensions.insert(ext.clone(), d.name.clone());
         }
-        self.languages.insert(d.name.clone(), d);
+        let name = d.name.clone();
+        let filenames = d.filenames.clone();
+        if self.languages.insert(name.clone(), d).is_some() {
+            // Custom definitions may replace a language's filename rules.
+            self.filenames.clear();
+            for language in self.languages.values() {
+                for filename in &language.filenames {
+                    self.filenames
+                        .entry(filename.to_ascii_lowercase())
+                        .or_insert_with(|| language.name.clone());
+                }
+            }
+        } else {
+            for filename in filenames {
+                self.filenames
+                    .entry(filename.to_ascii_lowercase())
+                    .and_modify(|previous| {
+                        // Preserve the previous alphabetical language priority.
+                        if name < *previous {
+                            *previous = name.clone();
+                        }
+                    })
+                    .or_insert_with(|| name.clone());
+            }
+        }
     }
     pub fn get(&self, name: &str) -> Option<&Language> {
         self.languages.get(name).or_else(|| {
@@ -129,12 +155,8 @@ impl Registry {
         if filename == "CMakeLists.txt" {
             return self.get("CMake");
         };
-        if let Some(d) = self.languages.values().find(|d| {
-            d.filenames
-                .iter()
-                .any(|s| s == filename || s.eq_ignore_ascii_case(filename))
-        }) {
-            return Some(d);
+        if let Some(name) = self.filenames.get(&filename.to_ascii_lowercase()) {
+            return self.get(name);
         }
         if filename == "build.xml" {
             return self.get("Ant");

@@ -1,3 +1,4 @@
+mod basic;
 pub mod cli;
 pub mod counter;
 pub mod diff;
@@ -5,6 +6,7 @@ pub mod input;
 pub mod languages;
 pub mod model;
 pub mod output;
+mod progress;
 pub mod scratch;
 
 use anyhow::{Result, bail};
@@ -82,7 +84,8 @@ pub fn run() -> Result<()> {
         );
     }
     if o.flag("sum-reports") {
-        let r = output::sum_reports(&o.inputs)?;
+        let mut r = output::sum_reports(&o.inputs)?;
+        basic::filter(&mut r, &o)?;
         return output::emit(&output::render_count(&r, &o)?, &o);
     }
     if o.flag("diff") {
@@ -90,6 +93,11 @@ pub fn run() -> Result<()> {
         count_opts.flags.remove("diff");
         count_opts.values.remove("list-file");
         count_opts.flags.insert("skip-uniqueness".into());
+        if o.has("basic") {
+            // Select minor languages across the pair, so a deletion cannot
+            // disappear simply because its new-side percentage is zero.
+            count_opts.set("basic", "0".into());
+        }
         let (old_inputs, new_inputs) = if let Some(v) = o.values.get("diff-list-files") {
             (input::list_inputs(&v[0])?, input::list_inputs(&v[1])?)
         } else if o.has("diff-list-file") {
@@ -104,8 +112,12 @@ pub fn run() -> Result<()> {
             };
             (vec![o.inputs[0].clone()], vec![o.inputs[1].clone()])
         };
-        let a = input::report(&count_opts, &registry, &old_inputs)?;
-        let b = input::report(&count_opts, &registry, &new_inputs)?;
+        let mut a = input::report(&count_opts, &registry, &old_inputs)?;
+        let mut b = input::report(&count_opts, &registry, &new_inputs)?;
+        basic::filter_pair(&mut a, &mut b, &o)?;
+        if o.has("basic") {
+            input::write_diagnostics(&b, &o)?;
+        }
         let d = diff::compare_reports(&a, &b, &o)?;
         if o.flag("count-and-diff") {
             if let Some(path) = o.value("report-file") {

@@ -3,26 +3,27 @@ use crate::{
     counter,
     languages::Registry,
     model::{Report, Source},
+    progress::Progress,
 };
 use anyhow::{Context, Result, bail};
 use fancy_regex::Regex;
 use rayon::prelude::*;
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashSet},
     fs,
     io::{Cursor, Read},
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
 use walkdir::WalkDir;
 const VCS_DIRS: [&str; 6] = [".git", ".svn", ".hg", ".bzr", ".cvs", ".snapshot"];
+// Verified against the behavioral reference: these suffixes are ignored even
+// when their contents have a shebang. Explicit language mappings override this.
+const NON_SOURCE_EXTENSIONS: [&str; 8] = ["jpg", "png", "gif", "bmp", "tiff", "pdf", "mp3", "wav"];
 pub const GENERATED: &str = "aclocal.m4,autom4te.cache,config.guess,config.sub,configure,depcomp,install-sh,ltmain.sh,missing,Makefile.in";
-fn matches(p: &str, text: &str) -> Result<bool> {
-    Ok(Regex::new(p)
-        .with_context(|| format!("invalid regular expression {p}"))?
-        .is_match(text)?)
-}
 fn list(p: &str) -> Result<Vec<String>> {
     let s = if p == "-" {
         let mut s = String::new();
@@ -44,9 +45,19 @@ fn absolute(p: &Path) -> PathBuf {
         std::env::current_dir().unwrap_or_default().join(p)
     }
 }
-#[derive(Default)]
 struct Selection {
     excluded: Vec<PathBuf>,
+    cwd: PathBuf,
+    excluded_dirs: HashSet<String>,
+    included_ext: HashSet<String>,
+    excluded_ext: HashSet<String>,
+    match_files: Vec<Regex>,
+    skip_files: Vec<Regex>,
+    match_dirs: Vec<Regex>,
+    skip_dirs: Vec<Regex>,
+    fullpath: bool,
+    no_autogen: bool,
+    skip_hidden: bool,
 }
 impl Selection {
     fn new(o: &Options) -> Result<Self> {
@@ -54,75 +65,105 @@ impl Selection {
         for p in o.all("exclude-list-file") {
             excluded.extend(list(p)?.into_iter().map(|p| absolute(Path::new(&p))))
         }
-        Ok(Self { excluded })
+        Ok(Self {
+            excluded,
+            cwd: std::env::current_dir()?,
+            excluded_dirs: o.list("exclude-dir").into_iter().collect(),
+            included_ext: o.list("include-ext").into_iter().collect(),
+            excluded_ext: o.list("exclude-ext").into_iter().collect(),
+            match_files: patterns(o, "match-f")?,
+            skip_files: patterns(o, "not-match-f")?,
+            match_dirs: patterns(o, "match-d")?,
+            skip_dirs: patterns(o, "not-match-d")?,
+            fullpath: o.flag("fullpath"),
+            no_autogen: o.has("no-autogen"),
+            skip_hidden: o.flag("skip-win-hidden"),
+        })
     }
     fn excluded(&self, p: &Path) -> bool {
-        let a = absolute(p);
-        self.excluded.iter().any(|e| a == *e || a.starts_with(e))
+        if self.excluded.is_empty() {
+            return false;
+        }
+        let a = if p.is_absolute() {
+            Cow::Borrowed(p)
+        } else {
+            Cow::Owned(self.cwd.join(p))
+        };
+        self.excluded
+            .iter()
+            .any(|e| a.as_ref() == e || a.starts_with(e))
     }
-    fn dir(&self, p: &Path, o: &Options) -> Result<bool> {
+    fn dir(&self, p: &Path) -> Result<bool> {
         let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if VCS_DIRS.contains(&n) || o.list("exclude-dir").iter().any(|d| d == n) || self.excluded(p)
-        {
+        if VCS_DIRS.contains(&n) || self.excluded_dirs.contains(n) || self.excluded(p) {
             return Ok(false);
         };
-        let s = if o.flag("fullpath") {
-            p.to_string_lossy().into_owned()
+        if self.skip_dirs.is_empty() {
+            return Ok(true);
+        }
+        let s = if self.fullpath {
+            p.to_string_lossy()
         } else {
-            n.into()
+            Cow::Borrowed(n)
         };
-        for r in o.all("not-match-d") {
-            if matches(r, &s)? {
+        for r in &self.skip_dirs {
+            if r.is_match(&s)? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
-    fn file(&self, p: &Path, o: &Options) -> Result<bool> {
+    fn file(&self, p: &Path) -> Result<bool> {
         if self.excluded(p) {
             return Ok(false);
         }
         let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
-        let inc = o.list("include-ext");
-        let exc = o.list("exclude-ext");
-        if (!inc.is_empty() && !inc.iter().any(|e| e == ext)) || exc.iter().any(|e| e == ext) {
+        if (!self.included_ext.is_empty() && !self.included_ext.contains(ext))
+            || self.excluded_ext.contains(ext)
+        {
             return Ok(false);
         }
-        if o.has("no-autogen") && GENERATED.split(',').any(|s| s == n) {
+        if self.no_autogen && GENERATED.split(',').any(|s| s == n) {
             return Ok(false);
         }
-        if o.flag("skip-win-hidden") && n.starts_with('.') {
+        if self.skip_hidden && n.starts_with('.') {
             return Ok(false);
         }
-        let s = if o.flag("fullpath") {
-            p.to_string_lossy().into_owned()
+        let s = if self.fullpath {
+            p.to_string_lossy()
         } else {
-            n.into()
+            Cow::Borrowed(n)
         };
-        for r in o.all("match-f") {
-            if !matches(r, &s)? {
+        for r in &self.match_files {
+            if !r.is_match(&s)? {
                 return Ok(false);
             }
         }
-        for r in o.all("not-match-f") {
-            if matches(r, &s)? {
+        for r in &self.skip_files {
+            if r.is_match(&s)? {
                 return Ok(false);
             }
         }
-        for r in o.all("match-d") {
-            if !matches(r, &p.parent().unwrap_or(Path::new("")).to_string_lossy())? {
+        for r in &self.match_dirs {
+            if !r.is_match(&p.parent().unwrap_or(Path::new("")).to_string_lossy())? {
                 return Ok(false);
             }
         }
         // Apply directory exclusions to git and archive member lists too.
         for ancestor in p.ancestors().skip(1) {
-            if !self.dir(ancestor, o)? {
+            if !self.dir(ancestor)? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
+}
+fn patterns(o: &Options, key: &str) -> Result<Vec<Regex>> {
+    o.all(key)
+        .into_iter()
+        .map(|p| Regex::new(p).with_context(|| format!("invalid regular expression {p}")))
+        .collect()
 }
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = Command::new("git")
@@ -160,6 +201,10 @@ fn archive_kind(n: &str) -> bool {
     .iter()
     .any(|e| n.ends_with(e))
 }
+fn ignored_media(p: &Path, registry: &Registry, o: &Options) -> bool {
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+    NON_SOURCE_EXTENSIONS.contains(&ext) && registry.detect(&p.to_string_lossy(), "", o).is_none()
+}
 fn archive(
     name: &str,
     bytes: Vec<u8>,
@@ -187,7 +232,7 @@ fn archive(
                 .enclosed_name()
                 .context("unsafe archive member name")?;
             let n = p.to_string_lossy().into_owned();
-            if !sel.file(&p, o)? {
+            if !sel.file(&p)? {
                 continue;
             };
             let mut b = Vec::new();
@@ -222,7 +267,7 @@ fn archive(
             {
                 bail!("unsafe archive member name")
             };
-            if !sel.file(&p, o)? {
+            if !sel.file(&p)? {
                 continue;
             };
             let n = p.to_string_lossy().into_owned();
@@ -248,10 +293,23 @@ fn archive(
     Ok(())
 }
 pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
+    let progress = Progress::new(o)?;
+    progress.begin("Scanning", None);
+    let sources = collect_with_progress(o, inputs, &progress)?;
+    progress.finish(sources.len());
+    Ok(sources)
+}
+fn collect_with_progress(
+    o: &Options,
+    inputs: &[String],
+    progress: &Progress,
+) -> Result<Vec<Source>> {
     let sel = Selection::new(o)?;
     let registry = Registry::new(o)?;
     let included_languages = o.list("include-lang");
     let excluded_languages = o.list("exclude-lang");
+    let skip_archive = o.value("skip-archive").map(Regex::new).transpose()?;
+    let max_file_size = o.number("max-file-size", 100.0)? * 1024.0 * 1024.0;
     let mut sources = Vec::new();
     let mut paths = inputs.to_vec();
     for p in o.all("list-file") {
@@ -316,6 +374,7 @@ pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
         }
     }
     let mut seen = HashSet::new();
+    let mut discovered = 0;
     for arg in paths {
         if arg == "-" {
             let mut bytes = Vec::new();
@@ -345,8 +404,10 @@ pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
                     &["ls-tree", "-r", "-z", "--name-only", &hash],
                 )?;
                 for n in tree.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+                    discovered += 1;
+                    progress.update("Scanning", discovered, None);
                     let n = String::from_utf8(n.to_vec()).context("git path is not UTF-8")?;
-                    if !sel.file(Path::new(&n), o)? {
+                    if !sel.file(Path::new(&n))? {
                         continue;
                     };
                     let spec = format!("{hash}:{n}");
@@ -363,20 +424,26 @@ pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
             }
             bail!("input does not exist and is not a git revision: {arg}")
         }
-        let files: Vec<PathBuf> = if path.is_dir() {
+        let directory = path.is_dir();
+        let explicit = path.is_file();
+        let files: Vec<PathBuf> = if directory {
             let depth = if o.flag("no-recurse") { 1 } else { usize::MAX };
             let mut files = Vec::new();
             for entry in WalkDir::new(path)
                 .max_depth(depth)
                 .follow_links(o.flag("follow-links"))
                 .into_iter()
-                .filter_entry(|e| !e.file_type().is_dir() || sel.dir(e.path(), o).unwrap_or(false))
+                .filter_entry(|e| !e.file_type().is_dir() || sel.dir(e.path()).unwrap_or(false))
             {
                 let entry = entry.with_context(|| format!("traversing {}", path.display()))?;
                 if entry.file_type().is_file()
                     || (entry.file_type().is_symlink() && entry.path().is_file())
                 {
-                    files.push(entry.path().into())
+                    discovered += 1;
+                    progress.update("Scanning", discovered, None);
+                    if !ignored_media(entry.path(), &registry, o) {
+                        files.push(entry.path().into());
+                    }
                 }
             }
             files
@@ -384,21 +451,32 @@ pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
             vec![path.into()]
         };
         for p in files {
-            if !sel.file(&p, o)? {
+            progress.update("Reading", sources.len(), None);
+            if !sel.file(&p)? {
                 continue;
             };
+            if !directory && ignored_media(&p, &registry, o) {
+                // Prune known non-source files before filesystem resolution,
+                // metadata, opening, and probing. Large image corpora should
+                // cost a directory walk, not hundreds of thousands of reads.
+                continue;
+            }
             let canonical = fs::canonicalize(&p)?;
             if !seen.insert(canonical) {
                 continue;
             };
-            let explicit = path.is_file();
+            // cloc expands archive arguments, but treats archives encountered
+            // inside a directory as ordinary ignored files.
+            if !explicit && archive_kind(&p.to_string_lossy()) {
+                continue;
+            }
             let len = fs::metadata(&p)?.len();
-            if !explicit && len as f64 > o.number("max-file-size", 100.0)? * 1024.0 * 1024.0 {
+            if !explicit && len as f64 > max_file_size {
                 continue;
             };
             let n = p.to_string_lossy().into_owned();
-            if let Some(pattern) = o.value("skip-archive") {
-                if matches(pattern, &n)? {
+            if let Some(pattern) = &skip_archive {
+                if pattern.is_match(&n)? {
                     continue;
                 }
             }
@@ -409,8 +487,11 @@ pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
                 extracted.values.remove("extract-with");
                 extracted.values.remove("list-file");
                 extracted.values.remove("vcs");
-                let mut items =
-                    collect(&extracted, &[scratch.path.to_string_lossy().into_owned()])?;
+                let mut items = collect_with_progress(
+                    &extracted,
+                    &[scratch.path.to_string_lossy().into_owned()],
+                    progress,
+                )?;
                 for item in &mut items {
                     item.name = format!("{n}/{}", item.key);
                 }
@@ -444,10 +525,15 @@ pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
                             || excluded_languages
                                 .iter()
                                 .any(|n| n.eq_ignore_ascii_case(&l.name))
+                            || crate::basic::excluded_language(o, &l.name, &included_languages)
                     });
                 let unknown =
                     language.is_none() && !o.flag("unicode") && !o.flag("read-binary-files");
-                if binary || unknown || excluded {
+                if binary {
+                    // No consumer decodes a rejected binary. Retain only its
+                    // classification marker, not a prefix per image/artifact.
+                    vec![0]
+                } else if unknown || excluded {
                     prefix
                 } else {
                     file.read_to_end(&mut prefix)?;
@@ -457,7 +543,7 @@ pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
             if archive_kind(&n) {
                 archive(&n, bytes, o, &sel, &mut sources, 0)?
             } else {
-                let key = if path.is_dir() {
+                let key = if directory {
                     p.strip_prefix(path)
                         .unwrap_or(&p)
                         .to_string_lossy()
@@ -482,14 +568,22 @@ pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
 }
 pub fn report(o: &Options, registry: &Registry, inputs: &[String]) -> Result<Report> {
     let start = Instant::now();
-    let sources = collect(o, inputs)?;
+    let progress = Progress::new(o)?;
+    progress.begin("Scanning", None);
+    let sources = collect_with_progress(o, inputs, &progress)?;
+    progress.begin("Classifying", Some(sources.len()));
     let mut report = Report {
         found: sources.iter().map(|s| s.name.clone()).collect(),
         ..Default::default()
     };
     let mut seen = BTreeSet::new();
     let mut prepared = Vec::new();
-    for s in sources {
+    let include = o.list("include-lang");
+    let exclude = o.list("exclude-lang");
+    let include_content = patterns(o, "include-content")?;
+    let exclude_content = patterns(o, "exclude-content")?;
+    for (index, s) in sources.into_iter().enumerate() {
+        progress.update("Classifying", index, Some(report.found.len()));
         let result = (|| -> Result<Option<(Source, String, String)>> {
             let Some(text) = counter::decode(&s.bytes, o.flag("unicode")).or_else(|| {
                 o.flag("read-binary-files")
@@ -504,26 +598,25 @@ pub fn report(o: &Options, registry: &Registry, inputs: &[String]) -> Result<Rep
                     .push((s.name.clone(), "language not recognized".into()));
                 return Ok(None);
             };
-            let include = o.list("include-lang");
-            let exclude = o.list("exclude-lang");
             if (!include.is_empty() && !include.iter().any(|n| n.eq_ignore_ascii_case(&lang.name)))
                 || exclude.iter().any(|n| n.eq_ignore_ascii_case(&lang.name))
+                || crate::basic::excluded_language(o, &lang.name, &include)
             {
                 report
                     .ignored
                     .push((s.name.clone(), "language excluded".into()));
                 return Ok(None);
             }
-            for p in o.all("include-content") {
-                if !matches(p, &text)? {
+            for p in &include_content {
+                if !p.is_match(&text)? {
                     report
                         .ignored
                         .push((s.name.clone(), "content excluded".into()));
                     return Ok(None);
                 }
             }
-            for p in o.all("exclude-content") {
-                if matches(p, &text)? {
+            for p in &exclude_content {
+                if p.is_match(&text)? {
                     report
                         .ignored
                         .push((s.name.clone(), "content excluded".into()));
@@ -546,8 +639,16 @@ pub fn report(o: &Options, registry: &Registry, inputs: &[String]) -> Result<Rep
             prepared.push(v)
         }
     }
+    progress.begin("Counting", Some(prepared.len()));
+    let completed = AtomicUsize::new(0);
     let count = |(s, text, name): &(Source, String, String)| {
-        counter::count(s, text, registry.get(name).unwrap(), o)
+        let result = counter::count(s, text, registry.get(name).unwrap(), o);
+        progress.update(
+            "Counting",
+            completed.fetch_add(1, Ordering::Relaxed) + 1,
+            Some(prepared.len()),
+        );
+        result
     };
     let n = o.number("processes", 0.0)? as usize;
     let files: Vec<Result<_>> = if n > 0 {
@@ -558,6 +659,7 @@ pub fn report(o: &Options, registry: &Registry, inputs: &[String]) -> Result<Rep
     } else {
         prepared.iter().map(count).collect::<Vec<_>>()
     };
+    progress.finish(prepared.len());
     for ((source, _, _), result) in prepared.iter().zip(files) {
         let file = match result {
             Ok(f) => f,
@@ -633,12 +735,13 @@ pub fn report(o: &Options, registry: &Registry, inputs: &[String]) -> Result<Rep
             .add(file.counts);
         report.total.add(file.counts);
         report.files.push(file);
-        let progress = o.number("progress-rate", 100.0)? as usize;
-        if !o.flag("quiet") && progress > 0 && report.files.len() % progress == 0 {
-            eprintln!("{} files counted", report.files.len());
-        }
     }
+    crate::basic::filter(&mut report, o)?;
     report.elapsed = start.elapsed().as_secs_f64();
+    write_diagnostics(&report, o)?;
+    Ok(report)
+}
+pub(crate) fn write_diagnostics(report: &Report, o: &Options) -> Result<()> {
     for key in ["found", "counted", "unique", "ignored", "categorized"] {
         if let Some(p) = o.value(key) {
             let data = match key {
@@ -672,7 +775,7 @@ pub fn report(o: &Options, registry: &Registry, inputs: &[String]) -> Result<Rep
             fs::write(p, data + "\n")?;
         }
     }
-    Ok(report)
+    Ok(())
 }
 pub fn list_inputs(p: &str) -> Result<Vec<String>> {
     list(p)

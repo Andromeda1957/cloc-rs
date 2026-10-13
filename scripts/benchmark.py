@@ -23,5 +23,5 @@ for tool in [args.binary,args.reference]:
         subprocess.run(command,stdout=subprocess.DEVNULL,check=True)
         samples.append(time.perf_counter()-start)
     results[tool]=statistics.median(samples)
-    print(f'{tool}: median {results[tool]:.4f} s ({args.runs} runs)')
-print(f'cloc-rs speedup: {results[args.reference]/results[args.binary]:.2f}x')
+    print(f'{tool}: median {results[tool]:.4f} s ({args.runs} runs)',flush=True)
+print(f'cloc-rs speedup: {results[args.reference]/results[args.binary]:.2f}x',flush=True)

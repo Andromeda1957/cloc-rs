@@ -13,7 +13,7 @@ pub struct Options {
 }
 const FLAGS: &str = "only-count-files read-binary-files help version unicode autoconf by-file by-file-by-lang count-and-diff diff docstring-as-code follow-links git git-diff-rel git-diff-all ignore-whitespace ignore-case ignore-case-ext no-recurse original-dir skip-uniqueness stat strip-str-comments sum-reports unix windows include-submodules fullpath skip-win-hidden print-filter-stages show-os 3 csv hide-rate json md percent quiet show-errors sql-append sum-one xml yaml use-sloccount";
 const VALUES: &str = "skip-leading stdin-name extract-with list-file diff-list-file files-from vcs config diff-timeout force-lang force-lang-def ignore-regex lang-no-ext max-file-size read-lang-def script-lang sdir strip-code strip-comments timeout processes include-content exclude-content exclude-dir exclude-ext exclude-lang exclude-list-file include-ext include-lang match-d not-match-d match-f not-match-f skip-archive categorized counted diff-alignment explain found ignored unique write-lang-def write-lang-def-incl-dup by-percent csv-delimiter file-encoding fmt out progress-rate report-file sql sql-project sql-style summary-cutoff thousands-delimiter ksep xsl";
-const OPTIONAL: &str = "show-lang show-ext no-autogen verbose v";
+const OPTIONAL: &str = "show-lang show-ext no-autogen verbose v basic";
 impl Options {
     pub fn flag(&self, k: &str) -> bool {
         self.flags.contains(k)
@@ -100,6 +100,7 @@ impl Options {
             opts.consume(args)?;
         }
         opts.consume(raw)?;
+        crate::basic::configure(&mut opts)?;
         if opts.flag("by-file-by-lang") {
             opts.flags.insert("by-file".into());
         }
@@ -228,8 +229,10 @@ impl Options {
     }
 }
 pub fn help() -> String {
-    format!(
+    let mut help = format!(
         "cloc-rs {} — Count Lines of Code in Rust\n\nUsage: cloc-rs [options] <files/directories/archives/git revisions>\n       cloc-rs --diff <old> <new>\n\nCounts blank, comment, and physical code lines. Mixed code/comment lines count as code.\n\nInput: --list-file FILE, --vcs git|auto|CMD, --git, --stdin-name FILE,\n       --unicode, --autoconf, --follow-links, --no-recurse, --max-file-size MB\nFilters: --include-lang LIST, --exclude-lang LIST, --include-ext LIST,\n         --exclude-ext LIST, --exclude-dir LIST, --exclude-list-file FILE,\n         --match-f REGEX, --not-match-f REGEX, --match-d REGEX, --not-match-d REGEX,\n         --fullpath, --include-content REGEX, --exclude-content REGEX,\n         --ignore-regex 'LANG,...|REGEX', --no-autogen\nCounting: --skip-leading N[,EXT], --only-count-files, --read-binary-files,\n          --by-file, --by-file-by-lang, --skip-uniqueness, --processes N,\n          --docstring-as-code, --force-lang LANG[,EXT], --lang-no-ext LANG,\n          --script-lang LANG,INTERPRETER, --read-lang-def FILE, --force-lang-def FILE\nDiff: --diff, --count-and-diff, --diff-list-file FILE, --diff-list-files OLD NEW,\n      --diff-alignment FILE, --ignore-case, --ignore-whitespace, --git-diff-all\nOutput: --3, --json, --yaml, --csv, --md, --xml, --sql FILE, --report-file FILE,\n        --csv-delimiter CHAR, --sql-project NAME, --sql-append, --xsl FILE,\n        --hide-rate, --quiet, --sum-one, --fmt 1..5, --by-percent c|cm|cb|cmb|t,\n        --summary-cutoff X:N, --thousands-delimiter CHAR, --sum-reports\nInspection: --show-lang[=LANG], --show-ext[=EXT], --explain LANG, --show-os,\n            --write-lang-def FILE, --counted FILE, --found FILE, --ignored FILE,\n            --unique FILE, --categorized FILE, --version, --help\nOther: --config FILE, --strip-comments EXT, --strip-code EXT, --original-dir,\n       --strip-str-comments, --print-filter-stages, --timeout N, --diff-timeout N\n\nConfiguration: $XDG_CONFIG_HOME/cloc-rs/options.txt or ~/.config/cloc-rs/options.txt.\nSyntax: --option=value and --option value. Independent MIT implementation; see\nREADME.md for the compatibility contract and verification procedure.\n",
         env!("CARGO_PKG_VERSION")
-    )
+    );
+    help.push_str("\nPreset: --basic[=PERCENT] excludes documents, config, dependencies, and build\n        directories, then hides languages below 1% of source code (default).\n        --basic=0 keeps all source languages; --include-lang preserves requested\n        languages. --progress-rate=N updates every N files; 0 disables progress.\n");
+    help
 }
