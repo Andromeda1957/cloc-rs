@@ -118,7 +118,8 @@ python3 tests/commands.py target/debug/cloc-rs
 python3 tests/compatibility.py --reference cloc-2.10.pl --catalog
 ```
 
-Supply the external cloc 2.10 reference yourself. The comparison suite covers
+Supply the external cloc 2.10 reference yourself, with Perl's
+`Parallel::ForkManager` installed for the multiprocessing comparison. The comparison suite covers
 counts, filters, duplicates, line endings, binary/Unicode input, stdin, lists,
 compressed archives, Git revisions, and diffs. The catalog pass tests each usable
 reference language with independently constructed basic comment syntax.
