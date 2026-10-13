@@ -51,7 +51,9 @@ impl Options {
         self.all(k)
             .iter()
             .flat_map(|v| v.split(','))
-            .map(|s| s.trim().to_owned())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
             .collect()
     }
     pub fn set(&mut self, k: &str, v: String) {

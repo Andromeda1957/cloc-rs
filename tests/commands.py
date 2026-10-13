@@ -26,6 +26,9 @@ with tempfile.TemporaryDirectory(prefix='commands-',dir=os.environ.get('TMPDIR')
     def data(*args,**kw):return json.loads(run('--json','--hide-rate',*args,**kw))
     expected={'nFiles':1,'blank':1,'comment':1,'code':2}
     assert data(source)['SUM']==expected
+    assert data('--exclude-lang=Text,',source)['SUM']==expected
+    assert data('--include-lang=Python,',source)['SUM']==expected
+    assert data('--exclude-dir=missing,',source)['SUM']==expected
     assert data('--processes','2',source)['SUM']==expected
     assert data('--by-file-by-lang',source)[str(source)]['language']=='Python'
     for fmt in ['--csv','--csv-delimiter=;']:
@@ -107,4 +110,18 @@ with tempfile.TemporaryDirectory(prefix='commands-',dir=os.environ.get('TMPDIR')
     assert ET.fromstring(run('--diff','--xml',source,changed)).tag=='diff_results'
     assert list(csv.reader(io.StringIO(run('--diff','--csv',source,changed))))[0][1]=='== files'
 
+    if sys.platform=='linux':
+        import resource
+        artifacts=root/'artifacts';artifacts.mkdir()
+        (artifacts/'main.py').write_text('x=1\n')
+        for i in range(10):
+            with open(artifacts/f'artifact-{i}.bin','wb')as f:f.truncate(16*1024*1024)
+        def memory_limit():
+            resource.setrlimit(resource.RLIMIT_AS,(128*1024*1024,128*1024*1024))
+            resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+        p=subprocess.run([binary,'--json','--quiet',str(artifacts)],cwd=root,
+                         preexec_fn=memory_limit,capture_output=True,text=True,timeout=30)
+        checks+=1
+        assert p.returncode==0,p.stderr
+        assert json.loads(p.stdout)['SUM']=={'nFiles':1,'blank':0,'comment':0,'code':1}
 print(f'{checks} CLI checks passed')

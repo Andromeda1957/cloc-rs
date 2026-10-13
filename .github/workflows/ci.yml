@@ -9,8 +9,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      TMPDIR: ${{ runner.temp }}/cloc-rs
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,7 +17,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Prepare temporary files
         shell: bash
-        run: mkdir -p "$TMPDIR"
+        run: |
+          mkdir -p "$RUNNER_TEMP/cloc-rs"
+          echo "TMPDIR=$RUNNER_TEMP/cloc-rs" >> "$GITHUB_ENV"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
@@ -27,16 +27,15 @@ jobs:
       - run: python tests/commands.py target/debug/cloc-rs
   conformance:
     runs-on: ubuntu-latest
-    env:
-      TMPDIR: ${{ runner.temp }}/cloc-rs
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Obtain external behavioral reference
         run: |
-          mkdir -p "$TMPDIR"
-          curl --fail --location --silent --show-error https://raw.githubusercontent.com/AlDanial/cloc/v2.10/cloc -o "$TMPDIR/cloc-reference.pl"
-          perl "$TMPDIR/cloc-reference.pl" --version
+          mkdir -p "$RUNNER_TEMP/cloc-rs"
+          echo "TMPDIR=$RUNNER_TEMP/cloc-rs" >> "$GITHUB_ENV"
+          curl --fail --location --silent --show-error https://raw.githubusercontent.com/AlDanial/cloc/v2.10/cloc -o "$RUNNER_TEMP/cloc-rs/cloc-reference.pl"
+          perl "$RUNNER_TEMP/cloc-rs/cloc-reference.pl" --version
       - run: cargo build --locked
       - run: python3 tests/compatibility.py --reference "$TMPDIR/cloc-reference.pl" --catalog

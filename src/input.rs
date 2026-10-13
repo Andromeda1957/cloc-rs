@@ -249,6 +249,9 @@ fn archive(
 }
 pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
     let sel = Selection::new(o)?;
+    let registry = Registry::new(o)?;
+    let included_languages = o.list("include-lang");
+    let excluded_languages = o.list("exclude-lang");
     let mut sources = Vec::new();
     let mut paths = inputs.to_vec();
     for p in o.all("list-file") {
@@ -414,7 +417,43 @@ pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
                 sources.extend(items);
                 continue;
             }
-            let bytes = fs::read(&p).with_context(|| format!("reading {n}"))?;
+            let bytes = if archive_kind(&n) {
+                fs::read(&p).with_context(|| format!("reading {n}"))?
+            } else {
+                // Inspect a small prefix before reading an entire build artifact.
+                // Keeping that prefix preserves found/ignored diagnostics while
+                // avoiding full allocations for binary and unrecognized files.
+                let mut file = fs::File::open(&p).with_context(|| format!("reading {n}"))?;
+                let mut prefix = vec![0; 4096];
+                let read = file.read(&mut prefix)?;
+                prefix.truncate(read);
+                let binary =
+                    !o.flag("read-binary-files") && !o.flag("unicode") && prefix.contains(&0);
+                let text = counter::decode(&prefix, o.flag("unicode"));
+                let language = text
+                    .as_deref()
+                    .and_then(|text| registry.detect(&n, text, o));
+                let ambiguous = ["m", "pl", "v", "ts", "inc", "d", "cs"]
+                    .contains(&p.extension().and_then(|s| s.to_str()).unwrap_or(""));
+                let excluded = !ambiguous
+                    && language.is_some_and(|l| {
+                        (!included_languages.is_empty()
+                            && !included_languages
+                                .iter()
+                                .any(|n| n.eq_ignore_ascii_case(&l.name)))
+                            || excluded_languages
+                                .iter()
+                                .any(|n| n.eq_ignore_ascii_case(&l.name))
+                    });
+                let unknown =
+                    language.is_none() && !o.flag("unicode") && !o.flag("read-binary-files");
+                if binary || unknown || excluded {
+                    prefix
+                } else {
+                    file.read_to_end(&mut prefix)?;
+                    prefix
+                }
+            };
             if archive_kind(&n) {
                 archive(&n, bytes, o, &sel, &mut sources, 0)?
             } else {

@@ -128,6 +128,18 @@ forced. A catalog probe checks basic syntax, not every feature of that language.
 GitHub Actions runs Rust tests on Linux, macOS, and Windows and the comparison
 suite on Linux.
 
+Measure end-to-end performance on the same directory with installed binaries:
+
+```sh
+python3 scripts/benchmark.py --runs=5 .
+```
+
+Both programs run with identical counting arguments and a warmup. The script
+reports median wall time; results depend on the inputs and filesystem cache.
+Binary and unknown files are rejected after inspecting a small prefix rather
+than loading every build artifact. The CLI suite includes a bounded-memory scan
+with 160 MiB of binary artifacts to prevent this performance regression.
+
 ## License
 
 [MIT](LICENSE). Tokei's MIT notice is in
