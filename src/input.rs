@@ -7,18 +7,17 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use fancy_regex::Regex;
-use rayon::prelude::*;
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, HashSet},
+    collections::HashSet,
     fs,
-    io::{Cursor, Read},
+    io::{Cursor, Read, Seek},
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
 use walkdir::WalkDir;
+mod counting;
 const VCS_DIRS: [&str; 6] = [".git", ".svn", ".hg", ".bzr", ".cvs", ".snapshot"];
 // Verified against the behavioral reference: these suffixes are ignored even
 // when their contents have a shebang. Explicit language mappings override this.
@@ -205,24 +204,25 @@ fn ignored_media(p: &Path, registry: &Registry, o: &Options) -> bool {
     let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
     NON_SOURCE_EXTENSIONS.contains(&ext) && registry.detect(&p.to_string_lossy(), "", o).is_none()
 }
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
 fn archive(
     name: &str,
-    bytes: Vec<u8>,
+    reader: Box<dyn ReadSeek>,
     o: &Options,
     sel: &Selection,
-    sources: &mut Vec<Source>,
+    emit: &mut dyn FnMut(Source) -> Result<()>,
     level: usize,
 ) -> Result<()> {
     if level > 8 {
         bail!("archive nesting exceeds 8 levels: {name}")
     };
     let max = o.number("max-file-size", 100.0)? as u64 * 1024 * 1024;
-    let mut members: Vec<(String, Vec<u8>)> = Vec::new();
     if [".zip", ".jar", ".war", ".ear"]
         .iter()
         .any(|e| name.ends_with(e))
     {
-        let mut z = zip::ZipArchive::new(Cursor::new(bytes))?;
+        let mut z = zip::ZipArchive::new(reader)?;
         for i in 0..z.len() {
             let mut entry = z.by_index(i)?;
             if entry.is_dir() || entry.size() > max {
@@ -238,21 +238,20 @@ fn archive(
             let mut b = Vec::new();
             entry.by_ref().take(max + 1).read_to_end(&mut b)?;
             if b.len() as u64 <= max {
-                members.push((n, b));
+                archive_member(name, n, b, o, sel, emit, level)?;
             }
         }
     } else {
-        let cursor = Cursor::new(bytes);
         let reader: Box<dyn Read> = if name.ends_with(".gz") || name.ends_with(".tgz") {
-            Box::new(flate2::read::GzDecoder::new(cursor))
+            Box::new(flate2::read::GzDecoder::new(reader))
         } else if name.ends_with(".bz2") || name.ends_with(".tbz") || name.ends_with(".tbz2") {
-            Box::new(bzip2::read::BzDecoder::new(cursor))
+            Box::new(bzip2::read::BzDecoder::new(reader))
         } else if name.ends_with(".xz") || name.ends_with(".txz") {
-            Box::new(liblzma::read::XzDecoder::new(cursor))
+            Box::new(liblzma::read::XzDecoder::new(reader))
         } else if name.ends_with(".zst") || name.ends_with(".zstd") {
-            Box::new(zstd::stream::read::Decoder::new(cursor)?)
+            Box::new(zstd::stream::read::Decoder::new(reader)?)
         } else {
-            Box::new(cursor)
+            Box::new(reader)
         };
         let mut a = tar::Archive::new(reader);
         for e in a.entries()? {
@@ -274,43 +273,56 @@ fn archive(
             let mut b = Vec::new();
             e.by_ref().take(max + 1).read_to_end(&mut b)?;
             if b.len() as u64 <= max {
-                members.push((n, b))
+                archive_member(name, n, b, o, sel, emit, level)?;
             };
-        }
-    }
-    for (n, b) in members {
-        if archive_kind(&n) {
-            archive(&n, b, o, sel, sources, level + 1)?
-        } else {
-            sources.push(Source {
-                name: format!("{name}/{n}"),
-                key: n,
-                bytes: b,
-                explicit: false,
-            })
         }
     }
     Ok(())
 }
+fn archive_member(
+    name: &str,
+    n: String,
+    bytes: Vec<u8>,
+    o: &Options,
+    sel: &Selection,
+    emit: &mut dyn FnMut(Source) -> Result<()>,
+    level: usize,
+) -> Result<()> {
+    if archive_kind(&n) {
+        archive(&n, Box::new(Cursor::new(bytes)), o, sel, emit, level + 1)
+    } else {
+        emit(Source {
+            name: format!("{name}/{n}"),
+            key: n,
+            bytes,
+            explicit: false,
+        })
+    }
+}
 pub fn collect(o: &Options, inputs: &[String]) -> Result<Vec<Source>> {
     let progress = Progress::new(o)?;
     progress.begin("Scanning", None);
-    let sources = collect_with_progress(o, inputs, &progress)?;
+    let mut sources = Vec::new();
+    visit(o, inputs, &progress, &mut |source| {
+        sources.push(source);
+        Ok(())
+    })?;
+    sources.sort_by(|a, b| a.name.cmp(&b.name));
     progress.finish(sources.len());
     Ok(sources)
 }
-fn collect_with_progress(
+fn visit(
     o: &Options,
     inputs: &[String],
     progress: &Progress,
-) -> Result<Vec<Source>> {
+    emit: &mut dyn FnMut(Source) -> Result<()>,
+) -> Result<()> {
     let sel = Selection::new(o)?;
     let registry = Registry::new(o)?;
     let included_languages = o.list("include-lang");
     let excluded_languages = o.list("exclude-lang");
     let skip_archive = o.value("skip-archive").map(Regex::new).transpose()?;
     let max_file_size = o.number("max-file-size", 100.0)? * 1024.0 * 1024.0;
-    let mut sources = Vec::new();
     let mut paths = inputs.to_vec();
     for p in o.all("list-file") {
         paths.extend(list(p)?)
@@ -382,12 +394,12 @@ fn collect_with_progress(
             let n = o
                 .value("stdin-name")
                 .context("standard input requires --stdin-name")?;
-            sources.push(Source {
+            emit(Source {
                 name: n.into(),
                 key: n.into(),
                 bytes,
                 explicit: true,
-            });
+            })?;
             continue;
         }
         let path = Path::new(&arg);
@@ -412,12 +424,12 @@ fn collect_with_progress(
                     };
                     let spec = format!("{hash}:{n}");
                     if let Ok(bytes) = git(Path::new("."), &["show", &spec]) {
-                        sources.push(Source {
+                        emit(Source {
                             name: n.clone(),
                             key: n,
                             bytes,
                             explicit: false,
-                        })
+                        })?;
                     }
                 }
                 continue;
@@ -426,7 +438,7 @@ fn collect_with_progress(
         }
         let directory = path.is_dir();
         let explicit = path.is_file();
-        let files: Vec<PathBuf> = if directory {
+        let mut files: Vec<PathBuf> = if directory {
             let depth = if o.flag("no-recurse") { 1 } else { usize::MAX };
             let mut files = Vec::new();
             for entry in WalkDir::new(path)
@@ -450,8 +462,8 @@ fn collect_with_progress(
         } else {
             vec![path.into()]
         };
+        files.sort();
         for p in files {
-            progress.update("Reading", sources.len(), None);
             if !sel.file(&p)? {
                 continue;
             };
@@ -487,20 +499,22 @@ fn collect_with_progress(
                 extracted.values.remove("extract-with");
                 extracted.values.remove("list-file");
                 extracted.values.remove("vcs");
-                let mut items = collect_with_progress(
+                visit(
                     &extracted,
                     &[scratch.path.to_string_lossy().into_owned()],
                     progress,
+                    &mut |mut item| {
+                        item.name = format!("{n}/{}", item.key);
+                        emit(item)
+                    },
                 )?;
-                for item in &mut items {
-                    item.name = format!("{n}/{}", item.key);
-                }
-                sources.extend(items);
                 continue;
             }
-            let bytes = if archive_kind(&n) {
-                fs::read(&p).with_context(|| format!("reading {n}"))?
-            } else {
+            if archive_kind(&n) {
+                archive(&n, Box::new(fs::File::open(&p)?), o, &sel, emit, 0)?;
+                continue;
+            }
+            let bytes = {
                 // Inspect a small prefix before reading an entire build artifact.
                 // Keeping that prefix preserves found/ignored diagnostics while
                 // avoiding full allocations for binary and unrecognized files.
@@ -540,206 +554,111 @@ fn collect_with_progress(
                     prefix
                 }
             };
-            if archive_kind(&n) {
-                archive(&n, bytes, o, &sel, &mut sources, 0)?
+            let key = if directory {
+                p.strip_prefix(path)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .into_owned()
             } else {
-                let key = if directory {
-                    p.strip_prefix(path)
-                        .unwrap_or(&p)
-                        .to_string_lossy()
-                        .into_owned()
-                } else {
-                    p.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                sources.push(Source {
-                    name: n,
-                    key,
-                    bytes,
-                    explicit,
-                });
-            }
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            emit(Source {
+                name: n,
+                key,
+                bytes,
+                explicit,
+            })?;
         }
     }
-    sources.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(sources)
+    Ok(())
 }
 pub fn report(o: &Options, registry: &Registry, inputs: &[String]) -> Result<Report> {
     let start = Instant::now();
     let progress = Progress::new(o)?;
     progress.begin("Scanning", None);
-    let sources = collect_with_progress(o, inputs, &progress)?;
-    progress.begin("Classifying", Some(sources.len()));
-    let mut report = Report {
-        found: sources.iter().map(|s| s.name.clone()).collect(),
-        ..Default::default()
-    };
-    let mut seen = BTreeSet::new();
-    let mut prepared = Vec::new();
-    let include = o.list("include-lang");
-    let exclude = o.list("exclude-lang");
-    let include_content = patterns(o, "include-content")?;
-    let exclude_content = patterns(o, "exclude-content")?;
-    for (index, s) in sources.into_iter().enumerate() {
-        progress.update("Classifying", index, Some(report.found.len()));
-        let result = (|| -> Result<Option<(Source, String, String)>> {
-            let Some(text) = counter::decode(&s.bytes, o.flag("unicode")).or_else(|| {
-                o.flag("read-binary-files")
-                    .then(|| String::from_utf8_lossy(&s.bytes).into_owned())
-            }) else {
-                report.ignored.push((s.name.clone(), "binary file".into()));
-                return Ok(None);
-            };
-            let Some(lang) = registry.detect(&s.name, &text, o) else {
-                report
-                    .ignored
-                    .push((s.name.clone(), "language not recognized".into()));
-                return Ok(None);
-            };
-            if (!include.is_empty() && !include.iter().any(|n| n.eq_ignore_ascii_case(&lang.name)))
-                || exclude.iter().any(|n| n.eq_ignore_ascii_case(&lang.name))
-                || crate::basic::excluded_language(o, &lang.name, &include)
-            {
-                report
-                    .ignored
-                    .push((s.name.clone(), "language excluded".into()));
-                return Ok(None);
-            }
-            for p in &include_content {
-                if !p.is_match(&text)? {
-                    report
-                        .ignored
-                        .push((s.name.clone(), "content excluded".into()));
-                    return Ok(None);
-                }
-            }
-            for p in &exclude_content {
-                if p.is_match(&text)? {
-                    report
-                        .ignored
-                        .push((s.name.clone(), "content excluded".into()));
-                    return Ok(None);
-                }
-            }
-            if !o.flag("skip-uniqueness") && !seen.insert(*blake3::hash(&s.bytes).as_bytes()) {
-                report
-                    .ignored
-                    .push((s.name.clone(), "duplicate file".into()));
-                return Ok(None);
-            }
-            if s.bytes.is_empty() {
-                report.ignored.push((s.name.clone(), "empty file".into()));
-                return Ok(None);
-            };
-            Ok(Some((s, text, lang.name.clone())))
-        })()?;
-        if let Some(v) = result {
-            prepared.push(v)
-        }
-    }
-    progress.begin("Counting", Some(prepared.len()));
-    let completed = AtomicUsize::new(0);
-    let count = |(s, text, name): &(Source, String, String)| {
-        let result = counter::count(s, text, registry.get(name).unwrap(), o);
-        progress.update(
-            "Counting",
-            completed.fetch_add(1, Ordering::Relaxed) + 1,
-            Some(prepared.len()),
-        );
-        result
-    };
-    let n = o.number("processes", 0.0)? as usize;
-    let files: Vec<Result<_>> = if n > 0 {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(n)
-            .build()?
-            .install(|| prepared.par_iter().map(count).collect::<Vec<_>>())
-    } else {
-        prepared.iter().map(count).collect::<Vec<_>>()
-    };
-    progress.finish(prepared.len());
-    for ((source, _, _), result) in prepared.iter().zip(files) {
-        let file = match result {
-            Ok(f) => f,
-            Err(e) if e.downcast_ref::<counter::TimedOut>().is_some() => {
-                report.ignored.push((source.name.clone(), e.to_string()));
-                if !o.flag("quiet") || o.flag("show-errors") {
-                    eprintln!("{}: {e}", source.name)
-                };
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        if !o.flag("quiet") && (o.has("v") || o.has("verbose")) {
-            eprintln!("{}: {} code lines", file.name, file.counts.code)
-        }
-
-        if o.flag("print-filter-stages") {
-            eprintln!(
-                "{}\nOriginal:\n{}\nComments removed:\n{}",
-                file.name,
-                file.lines.join("\n"),
-                file.stripped.join("\n")
-            );
-        }
-        for (option, kind) in [("strip-comments", false), ("strip-code", true)] {
-            if let Some(ext) = o.value(option) {
-                let source = Path::new(&file.name);
-                let target = if o.flag("original-dir") {
-                    source.with_file_name(format!(
-                        "{}.{ext}",
-                        source.file_name().unwrap_or_default().to_string_lossy()
-                    ))
-                } else {
-                    PathBuf::from(format!(
-                        "{}.{ext}",
-                        source.file_name().unwrap_or_default().to_string_lossy()
-                    ))
-                };
-                if target.exists() {
-                    bail!(
-                        "refusing to overwrite existing stripped file {}",
-                        target.display()
-                    )
-                };
-                let lines: Vec<_> = file
-                    .lines
-                    .iter()
-                    .zip(&file.kinds)
-                    .filter_map(|(l, k)| {
-                        if (!kind && *k == crate::model::Kind::Code)
-                            || (kind && *k == crate::model::Kind::Comment)
-                        {
-                            Some(l.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                fs::write(
-                    target,
-                    if lines.is_empty() {
-                        String::new()
-                    } else {
-                        lines.join("\n") + "\n"
-                    },
-                )?;
-            }
-        }
-        report
-            .languages
-            .entry(file.language.clone())
-            .or_default()
-            .add(file.counts);
-        report.total.add(file.counts);
-        report.files.push(file);
-    }
+    let mut pipeline = counting::Pipeline::new(o, registry, &progress)?;
+    visit(o, inputs, &progress, &mut |source| pipeline.accept(source))?;
+    let mut report = pipeline.finish()?;
+    progress.finish(report.files.len());
     crate::basic::filter(&mut report, o)?;
     report.elapsed = start.elapsed().as_secs_f64();
     write_diagnostics(&report, o)?;
     Ok(report)
+}
+fn store_file(report: &mut Report, mut file: crate::model::FileCount, o: &Options) -> Result<()> {
+    if !o.flag("quiet") && (o.has("v") || o.has("verbose")) {
+        eprintln!("{}: {} code lines", file.name, file.counts.code)
+    }
+
+    if o.flag("print-filter-stages") {
+        eprintln!(
+            "{}\nOriginal:\n{}\nComments removed:\n{}",
+            file.name,
+            file.lines.join("\n"),
+            file.stripped.join("\n")
+        );
+    }
+    for (option, kind) in [("strip-comments", false), ("strip-code", true)] {
+        if let Some(ext) = o.value(option) {
+            let source = Path::new(&file.name);
+            let target = if o.flag("original-dir") {
+                source.with_file_name(format!(
+                    "{}.{ext}",
+                    source.file_name().unwrap_or_default().to_string_lossy()
+                ))
+            } else {
+                PathBuf::from(format!(
+                    "{}.{ext}",
+                    source.file_name().unwrap_or_default().to_string_lossy()
+                ))
+            };
+            if target.exists() {
+                bail!(
+                    "refusing to overwrite existing stripped file {}",
+                    target.display()
+                )
+            };
+            let lines: Vec<_> = file
+                .lines
+                .iter()
+                .zip(&file.kinds)
+                .filter_map(|(l, k)| {
+                    if (!kind && *k == crate::model::Kind::Code)
+                        || (kind && *k == crate::model::Kind::Comment)
+                    {
+                        Some(l.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            fs::write(
+                target,
+                if lines.is_empty() {
+                    String::new()
+                } else {
+                    lines.join("\n") + "\n"
+                },
+            )?;
+        }
+    }
+    report
+        .languages
+        .entry(file.language.clone())
+        .or_default()
+        .add(file.counts);
+    report.total.add(file.counts);
+
+    if !o.flag("retain-detail") {
+        file.lines = Vec::new();
+        file.kinds = Vec::new();
+        file.stripped = Vec::new();
+    }
+    report.files.push(file);
+    Ok(())
 }
 pub(crate) fn write_diagnostics(report: &Report, o: &Options) -> Result<()> {
     for key in ["found", "counted", "unique", "ignored", "categorized"] {
@@ -755,14 +674,7 @@ pub(crate) fn write_diagnostics(report: &Report, o: &Options) -> Result<()> {
                 "categorized" => report
                     .files
                     .iter()
-                    .map(|f| {
-                        format!(
-                            "{} {} {}",
-                            f.lines.iter().map(String::len).sum::<usize>(),
-                            f.language,
-                            f.name
-                        )
-                    })
+                    .map(|f| format!("{} {} {}", f.original_bytes, f.language, f.name))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 _ => report

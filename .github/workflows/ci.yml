@@ -27,6 +27,8 @@ jobs:
       - run: python tests/commands.py target/debug/cloc-rs
       - run: python tests/progress.py target/debug/cloc-rs
       - run: python tests/basic.py target/debug/cloc-rs
+      - run: python tests/memory.py target/debug/cloc-rs
+      - run: python tests/streaming.py target/debug/cloc-rs
   conformance:
     runs-on: ubuntu-latest
     steps:

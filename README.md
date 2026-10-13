@@ -18,7 +18,7 @@ cloc-rs --csv --out=counts.csv project.tar.gz
 cat main.py | cloc-rs --stdin-name=main.py -
 ```
 
-Interactive runs show scanning, reading, classification, and counting progress
+Interactive runs show scanning and counting progress
 on a single line that updates in place on stderr. Counting updates appear as
 files finish, including with `--processes`. Default updates are limited to twice
 per second. `--quiet` or `--progress-rate=0` disables progress; an explicit
@@ -60,7 +60,7 @@ at runtime. Git inputs require Git; SVN listings require SVN.
 Native archives include zip/jar/war/ear, tar, and gzip/bzip2/xz/zstd tarballs.
 Pass an archive explicitly to count its contents; directory scans skip archives,
 matching cloc's input selection.
-They are read in memory without disk extraction. Other types can use an explicit
+Archive members are counted individually without disk extraction. Other types can use an explicit
 `--extract-with='COMMAND >FILE<'`. Custom extraction uses a unique temporary
 directory removed after processing; `--sdir` selects its parent.
 
@@ -144,6 +144,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 python3 tests/commands.py target/debug/cloc-rs
 python3 tests/progress.py target/debug/cloc-rs
+python3 tests/streaming.py target/debug/cloc-rs
 python3 tests/basic.py target/debug/cloc-rs
 python3 tests/compatibility.py --reference cloc-2.10.pl --catalog
 ```
@@ -172,7 +173,30 @@ than loading every build artifact. The CLI suite includes a bounded-memory scan
 with 160 MiB of binary artifacts to prevent this performance regression.
 It also scans 40,000 image paths with a 128 MiB memory limit.
 Known media extensions are skipped before opening files, matching the reference.
-Filter lists, regular expressions, and filename language lookups are cached.
+Filter lists, regular expressions, and filename language lookups are prepared once per run.
+No repository contents or counting results are cached between runs. Ordinary
+reports release source text after counting each file; explicit parallel counting
+uses batches limited to 16 MiB of text (a larger individual file runs alone).
+Counts-only reports retain file metadata and duplicate hashes rather than per-line
+source copies. Diffs retain line details because comparison needs them.
+
+The memory suite reads three separate 144 MiB source repositories under a
+128 MiB address-space limit. On Linux it evicts only its own fixture files from
+the OS file cache before counting, so these checks do not depend on a warmup:
+
+```sh
+python3 tests/memory.py target/release/cloc-rs
+```
+
+For a repeatable first-pass comparison on Linux, the following script creates
+about 64 MiB of mixed source files and evicts their contents before every run.
+It reports wall time, peak process memory, and filesystem input I/O. Directory
+metadata caching is uncontrolled; storage speed still affects the result.
+It never evicts pages belonging to your repositories or clears system caches.
+
+```sh
+python3 scripts/benchmark_cold.py --binary=/path/to/previous/cloc-rs --binary=target/release/cloc-rs
+```
 
 ## License
 

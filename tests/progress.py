@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix='progress-', dir=os.environ.get('TMPDIR'
     # Keep workers occupied after the first small file finishes, without relying
     # on filesystem speed. The normal per-file timeout bounds this fixture.
     for name in ['b.py', 'z.py']:
-        (root / name).write_text(f'# {name}\n' + '# padding for counting\n' * 400_000)
+        (root / name).write_text(f'# {name}\n' + 'value = fn("padding for counting")\n' * 800_000)
 
     def startup():
         p = Running(['--json', '--progress-rate=1', '--stdin-name=stdin.py', '-'], root, stdin=True)
@@ -85,9 +85,8 @@ with tempfile.TemporaryDirectory(prefix='progress-', dir=os.environ.get('TMPDIR'
         p = Running(['--json', '--progress-rate=1', '--timeout=0.25',
                      f'--processes={processes}', '.'], root)
         try:
-            p.expect('Classifying:')
-            p.expect('Counting: 0 / 3')
-            p.expect('Counting: 1 / 3')
+            p.expect('Counting: 0 files')
+            p.expect('Counting: 1 files')
             assert p.process.poll() is None, 'counting updates arrived after completion'
             p.finish()
         finally:

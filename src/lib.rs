@@ -91,6 +91,7 @@ pub fn run() -> Result<()> {
     if o.flag("diff") {
         let mut count_opts = o.clone();
         count_opts.flags.remove("diff");
+        count_opts.flags.insert("retain-detail".into());
         count_opts.values.remove("list-file");
         count_opts.flags.insert("skip-uniqueness".into());
         if o.has("basic") {

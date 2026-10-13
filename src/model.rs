@@ -50,6 +50,7 @@ pub struct FileCount {
     pub key: String,
     pub language: String,
     pub counts: Counts,
+    pub original_bytes: usize,
     pub lines: Vec<String>,
     pub kinds: Vec<Kind>,
     pub stripped: Vec<String>,

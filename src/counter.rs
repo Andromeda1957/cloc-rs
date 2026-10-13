@@ -118,6 +118,23 @@ pub fn decode(bytes: &[u8], unicode: bool) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
 pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> Result<FileCount> {
+    count_impl(source, text, language, o, true)
+}
+pub(crate) fn tally(
+    source: &Source,
+    text: &str,
+    language: &Language,
+    o: &Options,
+) -> Result<FileCount> {
+    count_impl(source, text, language, o, false)
+}
+fn count_impl(
+    source: &Source,
+    text: &str,
+    language: &Language,
+    o: &Options,
+    detail: bool,
+) -> Result<FileCount> {
     let skip = o
         .value("skip-leading")
         .map(|v| -> Result<usize> {
@@ -134,14 +151,11 @@ pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> R
         })
         .transpose()?
         .unwrap_or(0);
-    let lines: Vec<String> = text
-        .lines()
-        .skip(skip)
-        .map(|s| s.trim_end_matches('\r').to_owned())
-        .collect();
+    let mut lines = Vec::new();
     let mut state = State::Normal;
-    let mut kinds = Vec::with_capacity(lines.len());
-    let mut stripped = Vec::with_capacity(lines.len());
+    let mut kinds = Vec::new();
+    let mut stripped = Vec::new();
+    let mut original_bytes = 0;
     let mut counts = Counts {
         files: 1,
         ..Default::default()
@@ -204,9 +218,76 @@ pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> R
     } else {
         None
     };
-    for line in &lines {
+    let keep_clean = detail || !ignores.is_empty();
+    let mut syntax = [false; 256];
+    // Ordinary ASCII spans do not need delimiter checks at every character.
+    // Stop at non-ASCII bytes so Unicode whitespace keeps its original semantics.
+    syntax[128..].fill(true);
+    for token in inline
+        .iter()
+        .map(String::as_str)
+        .chain(blocks.iter().map(|(start, _)| start.as_str()))
+        .chain(quotes.iter().map(|(start, _)| start.as_str()))
+        .chain(language.verbatim.iter().map(|(start, _)| start.as_str()))
+    {
+        if let Some(first) = token.as_bytes().first() {
+            syntax[*first as usize] = true;
+        }
+    }
+    if language.name == "Rust" {
+        for byte in b"rb'" {
+            syntax[*byte as usize] = true;
+        }
+    }
+    if ["C++", "C/C++ Header", "Objective-C++"].contains(&language.name.as_str()) {
+        syntax[b'R' as usize] = true;
+    }
+    if ["HTML", "Vuejs Component", "Svelte"].contains(&language.name.as_str()) {
+        syntax[b'/' as usize] = true;
+    }
+    let plain = inline.is_empty()
+        && blocks.is_empty()
+        && remove.is_empty()
+        && ![
+            "Fortran 77",
+            "COBOL",
+            "ABAP",
+            "DOS Batch",
+            "Perl",
+            "HTML",
+            "Vuejs Component",
+            "Svelte",
+            "Rmd",
+            "Jupyter Notebook",
+        ]
+        .contains(&language.name.as_str())
+        && !language.name.starts_with("Literate ");
+    for line in text
+        .lines()
+        .skip(skip)
+        .map(|line| line.trim_end_matches('\r'))
+    {
+        original_bytes += line.len();
+        if detail {
+            lines.push(line.to_owned());
+        }
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Err(TimedOut("counting").into());
+        }
+        if plain {
+            let kind = if line.trim().is_empty() {
+                Kind::Blank
+            } else if regex_any(&ignores, line)? {
+                Kind::Ignored
+            } else {
+                Kind::Code
+            };
+            counts.line(kind);
+            if detail {
+                kinds.push(kind);
+                stripped.push(line.to_owned());
+            }
+            continue;
         }
 
         if language.name == "Rmd"
@@ -255,12 +336,14 @@ pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> R
                 }
             };
             counts.line(kind);
-            kinds.push(kind);
-            stripped.push(if kind == Kind::Code {
-                line.clone()
-            } else {
-                String::new()
-            });
+            if detail {
+                kinds.push(kind);
+                stripped.push(if kind == Kind::Code {
+                    line.to_owned()
+                } else {
+                    String::new()
+                });
+            }
             continue;
         }
         let mut clean = String::new();
@@ -296,62 +379,94 @@ pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> R
         }
         while i < line.len() {
             let ch = line[i..].chars().next().unwrap();
-            match state.clone() {
+            match &mut state {
                 State::Block { start, end, depth } => {
                     comment = true;
-                    if starts(line, i, &end) {
+                    if starts(line, i, end) {
                         i += end.len();
-                        if depth == 1 {
+                        if *depth == 1 {
                             state = State::Normal
                         } else {
-                            state = State::Block {
-                                start,
-                                end,
-                                depth: depth - 1,
-                            }
+                            *depth -= 1;
                         }
                     } else if (language.nested && language.name != "Rust")
                         && start != end
-                        && starts(line, i, &start)
+                        && starts(line, i, start)
                     {
                         i += start.len();
-                        state = State::Block {
-                            start,
-                            end,
-                            depth: depth + 1,
-                        }
+                        *depth += 1;
                     } else {
-                        i += ch.len_utf8()
+                        let ending = line[i..].find(end.as_str());
+                        let nesting = (language.nested && language.name != "Rust" && start != end)
+                            .then(|| line[i..].find(start.as_str()))
+                            .flatten();
+                        i += ending
+                            .into_iter()
+                            .chain(nesting)
+                            .min()
+                            .unwrap_or(line.len() - i);
                     }
                 }
                 State::Quote { end, verbatim } => {
                     code = true;
-                    if starts(line, i, &end) {
-                        clean.push_str(&end);
+                    if starts(line, i, end) {
+                        if keep_clean {
+                            clean.push_str(end);
+                        }
                         i += end.len();
-                        if verbatim && starts(line, i, &end) {
-                            clean.push_str(&end);
+                        if *verbatim && starts(line, i, end) {
+                            if keep_clean {
+                                clean.push_str(end);
+                            }
                             i += end.len()
                         } else {
                             state = State::Normal
                         }
-                    } else if ch == '\\' && !verbatim {
-                        clean.push(ch);
+                    } else if ch == '\\' && !*verbatim {
+                        if keep_clean {
+                            clean.push(ch);
+                        }
                         i += 1;
                         if i < line.len() {
                             let c = line[i..].chars().next().unwrap();
-                            clean.push(c);
+                            if keep_clean {
+                                clean.push(c);
+                            }
                             i += c.len_utf8();
                         }
                     } else {
-                        clean.push(ch);
-                        i += ch.len_utf8();
+                        let ending = line[i..].find(end.as_str());
+                        let escape = (!*verbatim).then(|| line[i..].find('\\')).flatten();
+                        let n = ending
+                            .into_iter()
+                            .chain(escape)
+                            .min()
+                            .unwrap_or(line.len() - i);
+                        if keep_clean {
+                            clean.push_str(&line[i..i + n]);
+                        }
+                        i += n;
                     }
                 }
                 State::Normal => {
+                    if !syntax[line.as_bytes()[i] as usize] {
+                        let n = line.as_bytes()[i..]
+                            .iter()
+                            .position(|byte| syntax[*byte as usize])
+                            .unwrap_or(line.len() - i);
+                        let span = &line[i..i + n];
+                        code |= span.bytes().any(|byte| !byte.is_ascii_whitespace());
+                        if keep_clean {
+                            clean.push_str(span);
+                        }
+                        i += n;
+                        continue;
+                    }
                     if let Some((n, end)) = raw_quote(line, i, &language.name) {
                         code = true;
-                        clean.push_str(&line[i..i + n]);
+                        if keep_clean {
+                            clean.push_str(&line[i..i + n]);
+                        }
                         i += n;
                         state = State::Quote {
                             end,
@@ -390,7 +505,9 @@ pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> R
                         if let Some(n) = tail.find('\'').filter(|n| *n <= 8) {
                             let len = n + 2;
                             code = true;
-                            clean.push_str(&line[i..i + len]);
+                            if keep_clean {
+                                clean.push_str(&line[i..i + len]);
+                            }
                             i += len;
                             continue;
                         }
@@ -403,7 +520,9 @@ pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> R
                         .find(|(s, _, _)| starts(line, i, s))
                     {
                         code = true;
-                        clean.push_str(s);
+                        if keep_clean {
+                            clean.push_str(s);
+                        }
                         i += s.len();
                         state = State::Quote {
                             end: e.clone(),
@@ -414,7 +533,9 @@ pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> R
                     if !ch.is_whitespace() {
                         code = true
                     };
-                    clean.push(ch);
+                    if keep_clean {
+                        clean.push(ch);
+                    }
                     i += ch.len_utf8();
                 }
             }
@@ -439,8 +560,10 @@ pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> R
             kind
         };
         counts.line(kind);
-        kinds.push(kind);
-        stripped.push(clean);
+        if detail {
+            kinds.push(kind);
+            stripped.push(clean);
+        }
         // Ordinary C-family quotes cannot continue past a physical newline unless escaped.
         if let State::Quote {
             ref end,
@@ -462,6 +585,7 @@ pub fn count(source: &Source, text: &str, language: &Language, o: &Options) -> R
         key: source.key.clone(),
         language: language.name.clone(),
         counts,
+        original_bytes,
         lines,
         kinds,
         stripped,
