@@ -168,15 +168,25 @@ python3 scripts/benchmark.py --runs=5 .
 
 Both programs run with identical counting arguments and a warmup. The script
 reports median wall time; results depend on the inputs and filesystem cache.
+Directory listing, file reads, and counting run on a worker pool sized to the
+available cores. `--processes=N` sets N workers, and `--processes=0` scans
+serially. Results are applied in input order, so reports, duplicate selection,
+and the first reported error match a serial scan. When the disk is cold or busy,
+for example while other programs write to the repository, several reads are in
+flight instead of one.
 Binary and unknown files are rejected after inspecting a small prefix rather
 than loading every build artifact. The CLI suite includes a bounded-memory scan
 with 160 MiB of binary artifacts to prevent this performance regression.
 It also scans 40,000 image paths with a 128 MiB memory limit.
 Known media extensions are skipped before opening files, matching the reference.
+A file whose name alone selects an excluded language, such as YAML or Markdown
+under `--basic`, is opened but not read unless `--ignored` records each reason.
+Comment and string scanning is linear in line length, so minified files with
+megabyte lines count in milliseconds.
 Filter lists, regular expressions, and filename language lookups are prepared once per run.
 No repository contents or counting results are cached between runs. Ordinary
-reports release source text after counting each file; explicit parallel counting
-uses batches limited to 16 MiB of text (a larger individual file runs alone).
+reports release source text after counting each file, and files being read or
+counted at once hold at most 16 MiB of text (a larger individual file runs alone).
 Counts-only reports retain file metadata and duplicate hashes rather than per-line
 source copies. Diffs retain line details because comparison needs them.
 

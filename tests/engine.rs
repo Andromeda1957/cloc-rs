@@ -150,6 +150,55 @@ fn language_detection() {
     }
 }
 #[test]
+fn names_that_decide_language_without_content() {
+    let o = Options::default();
+    let r = Registry::new(&o).unwrap();
+    for (p, l) in [
+        ("data.yaml", "YAML"),
+        ("README.md", "Markdown"),
+        ("main.cs", "C#"),
+        ("Makefile", "make"),
+    ] {
+        assert_eq!(r.named(p, &o).map(|l| l.name.as_str()), Some(l), "{p}");
+    }
+    // Content, a shebang, or nothing at all decides these.
+    for p in [
+        "main.m",
+        "main.pl",
+        "main.ts",
+        "main.v",
+        "script",
+        "notes.zzz",
+    ] {
+        assert!(r.named(p, &o).is_none(), "{p}");
+    }
+}
+#[test]
+fn long_minified_lines() {
+    // Many strings and comments, with the only backslashes near the start.
+    let text = "a='\\\\'; ".to_owned() + &"b=\"x\"; /* c */ d='e'; ".repeat(20_000);
+    let f = fixture("min.js", &(text + "// tail\n"), Options::default());
+    assert_eq!((f.counts.code, f.counts.comment), (1, 0));
+    let expected = "a='\\\\'; ".to_owned() + &"b=\"x\";  d='e'; ".repeat(20_000);
+    assert_eq!(f.stripped[0], expected);
+    let f = fixture(
+        "nest.hs",
+        "{- a {- b -} c -} x\n{- {- -}\n -}\n",
+        Options::default(),
+    );
+    assert_eq!((f.counts.code, f.counts.comment), (1, 2));
+}
+#[test]
+fn script_tags_ignore_only_ascii_case() {
+    let f = fixture(
+        "page.html",
+        "<SCRIPT>\n// a\n</Script>\n// b\n<scr\u{130}pt>\n// c\n",
+        Options::default(),
+    );
+    use Kind::{Code, Comment};
+    assert_eq!(f.kinds, [Code, Comment, Code, Code, Code, Code]);
+}
+#[test]
 fn literate() {
     let f = fixture(
         "file.Rmd",

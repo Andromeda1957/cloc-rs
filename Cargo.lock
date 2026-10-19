@@ -116,6 +116,7 @@ dependencies = [
  "fancy-regex",
  "flate2",
  "liblzma",
+ "memchr",
  "rayon",
  "regex",
  "serde",

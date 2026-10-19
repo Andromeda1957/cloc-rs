@@ -26,6 +26,10 @@ pub struct Language {
     #[serde(default)]
     pub filters: Vec<(String, String)>,
 }
+/// Texts that, with empty text, reach every content rule in [`Registry::detect`]:
+/// the first meets each rule's first test, the second the alternative `.m`
+/// test. A new content rule must be met by one of them, and missed by another.
+const CONTENT_PROBES: [&str; 2] = ["<?xml #import :- Require Import\n", "(*\n"];
 #[derive(Clone)]
 pub struct Registry {
     pub languages: BTreeMap<String, Language>,
@@ -132,6 +136,30 @@ impl Registry {
             }
         }
     }
+    /// Whether a file name ending in `.{ext}` can map to a language by its
+    /// name alone, through an extension, a compound extension, or a filename.
+    pub(crate) fn maps_suffix(&self, ext: &str) -> bool {
+        let dotted = format!(".{ext}");
+        self.extensions
+            .keys()
+            .chain(self.filenames.keys())
+            .any(|k| k == ext || k.ends_with(&dotted))
+    }
+    /// The language a file name selects whatever the file contains, if any.
+    ///
+    /// Empty text and [`CONTENT_PROBES`] together reach every content rule in
+    /// [`Registry::detect`], so a name whose detection depends on content
+    /// gives different answers for them and is not reported here.
+    pub fn named<'a>(&'a self, path: &str, o: &Options) -> Option<&'a Language> {
+        let language = self.detect(path, "", o)?;
+        CONTENT_PROBES
+            .iter()
+            .all(|text| {
+                self.detect(path, text, o)
+                    .is_some_and(|other| std::ptr::eq(other, language))
+            })
+            .then_some(language)
+    }
     pub fn get(&self, name: &str) -> Option<&Language> {
         self.languages.get(name).or_else(|| {
             self.languages
@@ -174,6 +202,7 @@ impl Registry {
         } else {
             &full
         };
+        // Every content rule below must stay reachable from CONTENT_PROBES.
         let mut found = None;
         for (i, _) in full.match_indices('.') {
             let ext = &full[i + 1..];

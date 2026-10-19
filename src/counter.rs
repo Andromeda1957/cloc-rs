@@ -38,8 +38,34 @@ fn regex_any(regexes: &[Regex], text: &str) -> Result<bool> {
 fn starts(text: &str, pos: usize, needle: &str) -> bool {
     text[pos..].starts_with(needle)
 }
-fn raw_quote(text: &str, pos: usize, lang: &str) -> Option<(usize, String)> {
-    if lang == "Rust" {
+/// The first position in `text` where `a` or `b` begins, found in one pass.
+/// Two separate searches would rescan the rest of a long minified line at
+/// every string or comment, which made such files quadratic.
+fn first_of(text: &str, a: &str, b: &str) -> Option<usize> {
+    let (text, a, b) = (text.as_bytes(), a.as_bytes(), b.as_bytes());
+    memchr::memchr2_iter(a[0], b[0], text)
+        .find(|&j| text[j..].starts_with(a) || text[j..].starts_with(b))
+}
+/// Whether `text` contains `needle`, which starts with `<`, ignoring ASCII case.
+/// This equals lowercasing `text` first for the markup tags searched here: the
+/// only non-ASCII characters that lowercase into ASCII letters are the Kelvin
+/// sign, which no tag contains, and dotted capital I, whose lowercase form
+/// keeps a combining dot after its `i`.
+fn has_tag(text: &str, needle: &str) -> bool {
+    let (text, needle) = (text.as_bytes(), needle.as_bytes());
+    memchr::memchr_iter(b'<', text).any(|j| {
+        text.get(j..j + needle.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(needle))
+    })
+}
+#[derive(Clone, Copy, PartialEq)]
+enum Raw {
+    None,
+    Rust,
+    Cpp,
+}
+fn raw_quote(text: &str, pos: usize, lang: Raw) -> Option<(usize, String)> {
+    if lang == Raw::Rust {
         let s = &text[pos..];
         let skip = if s.starts_with("br") {
             2
@@ -53,7 +79,7 @@ fn raw_quote(text: &str, pos: usize, lang: &str) -> Option<(usize, String)> {
             return Some((skip + n + 1, format!("\"{}", "#".repeat(n))));
         }
     }
-    if ["C++", "C/C++ Header", "Objective-C++"].contains(&lang) && text[pos..].starts_with("R\"") {
+    if lang == Raw::Cpp && text[pos..].starts_with("R\"") {
         if let Some(n) = text[pos + 2..].find('(').filter(|n| *n <= 16) {
             let d = &text[pos + 2..pos + 2 + n];
             return Some((n + 3, format!("){d}\"")));
@@ -234,15 +260,33 @@ fn count_impl(
             syntax[*first as usize] = true;
         }
     }
-    if language.name == "Rust" {
+    // Language rules are resolved once per file rather than by name per line.
+    let name = language.name.as_str();
+    let rust = name == "Rust";
+    let raw = if rust {
+        Raw::Rust
+    } else if ["C++", "C/C++ Header", "Objective-C++"].contains(&name) {
+        Raw::Cpp
+    } else {
+        Raw::None
+    };
+    let markup = ["HTML", "Vuejs Component", "Svelte"].contains(&name);
+    let fixed = ["Fortran 77", "COBOL", "ABAP", "DOS Batch"].contains(&name);
+    let perl = name == "Perl";
+    let literate = name.starts_with("Literate ");
+    let rmd = name == "Rmd";
+    let notebook = name == "Jupyter Notebook";
+    let nests = language.nested && !rust;
+    let python = name == "Python";
+    if rust {
         for byte in b"rb'" {
             syntax[*byte as usize] = true;
         }
     }
-    if ["C++", "C/C++ Header", "Objective-C++"].contains(&language.name.as_str()) {
+    if raw == Raw::Cpp {
         syntax[b'R' as usize] = true;
     }
-    if ["HTML", "Vuejs Component", "Svelte"].contains(&language.name.as_str()) {
+    if markup {
         syntax[b'/' as usize] = true;
     }
     let plain = inline.is_empty()
@@ -290,20 +334,17 @@ fn count_impl(
             continue;
         }
 
-        if language.name == "Rmd"
-            || language.name.starts_with("Literate ")
-            || language.name == "Jupyter Notebook"
-        {
+        if rmd || literate || notebook {
             let trim = line.trim();
             let kind = if trim.is_empty() {
                 Kind::Blank
-            } else if language.name.starts_with("Literate ") {
+            } else if literate {
                 if trim.starts_with('>') {
                     Kind::Code
                 } else {
                     Kind::Comment
                 }
-            } else if language.name == "Rmd" {
+            } else if rmd {
                 if trim.starts_with("```") {
                     fenced = !fenced;
                     Kind::Comment
@@ -350,12 +391,12 @@ fn count_impl(
         let mut code = false;
         let mut comment = matches!(state, State::Block { .. });
         let mut i = 0;
-        if matches!(state, State::Normal) && fixed_comment(line, &language.name) {
+        if fixed && matches!(state, State::Normal) && fixed_comment(line, name) {
             comment = true;
             i = line.len();
         }
         if matches!(state, State::Normal)
-            && language.name == "Perl"
+            && perl
             && line.starts_with('=')
             && line.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic)
             && !line.starts_with("=cut")
@@ -372,9 +413,7 @@ fn count_impl(
             comment = true;
             i = line.len();
         }
-        if ["HTML", "Vuejs Component", "Svelte"].contains(&language.name.as_str())
-            && line.to_lowercase().contains("<script")
-        {
+        if markup && has_tag(line, "<script") {
             embedded = true
         }
         while i < line.len() {
@@ -389,22 +428,17 @@ fn count_impl(
                         } else {
                             *depth -= 1;
                         }
-                    } else if (language.nested && language.name != "Rust")
-                        && start != end
-                        && starts(line, i, start)
-                    {
+                    } else if nests && start != end && starts(line, i, start) {
                         i += start.len();
                         *depth += 1;
                     } else {
-                        let ending = line[i..].find(end.as_str());
-                        let nesting = (language.nested && language.name != "Rust" && start != end)
-                            .then(|| line[i..].find(start.as_str()))
-                            .flatten();
-                        i += ending
-                            .into_iter()
-                            .chain(nesting)
-                            .min()
-                            .unwrap_or(line.len() - i);
+                        let rest = &line[i..];
+                        i += if nests && start != end {
+                            first_of(rest, end, start)
+                        } else {
+                            rest.find(end.as_str())
+                        }
+                        .unwrap_or(rest.len());
                     }
                 }
                 State::Quote { end, verbatim } => {
@@ -435,13 +469,13 @@ fn count_impl(
                             i += c.len_utf8();
                         }
                     } else {
-                        let ending = line[i..].find(end.as_str());
-                        let escape = (!*verbatim).then(|| line[i..].find('\\')).flatten();
-                        let n = ending
-                            .into_iter()
-                            .chain(escape)
-                            .min()
-                            .unwrap_or(line.len() - i);
+                        let rest = &line[i..];
+                        let n = if *verbatim {
+                            rest.find(end.as_str())
+                        } else {
+                            first_of(rest, end, "\\")
+                        }
+                        .unwrap_or(rest.len());
                         if keep_clean {
                             clean.push_str(&line[i..i + n]);
                         }
@@ -462,7 +496,7 @@ fn count_impl(
                         i += n;
                         continue;
                     }
-                    if let Some((n, end)) = raw_quote(line, i, &language.name) {
+                    if let Some((n, end)) = raw_quote(line, i, raw) {
                         code = true;
                         if keep_clean {
                             clean.push_str(&line[i..i + n]);
@@ -500,7 +534,7 @@ fn count_impl(
                         comment = true;
                         break;
                     }
-                    if language.name == "Rust" && ch == '\'' {
+                    if rust && ch == '\'' {
                         let tail = &line[i + 1..];
                         if let Some(n) = tail.find('\'').filter(|n| *n <= 8) {
                             let len = n + 2;
@@ -540,7 +574,7 @@ fn count_impl(
                 }
             }
         }
-        if embedded && line.to_lowercase().contains("</script") {
+        if embedded && has_tag(line, "</script") {
             embedded = false
         }
         let kind = if line.starts_with("#!") {
@@ -570,7 +604,7 @@ fn count_impl(
             verbatim: false,
         } = state
         {
-            if end.len() == 1 && end != "`" && language.name != "Python" && !line.ends_with('\\') {
+            if end.len() == 1 && end != "`" && !python && !line.ends_with('\\') {
                 state = State::Normal
             }
         }
